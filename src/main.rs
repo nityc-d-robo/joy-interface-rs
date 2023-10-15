@@ -161,6 +161,7 @@ fn worker(
                 let c = client.take().unwrap();
                 let mut request = drobo_interfaces::srv::SolenoidStateSrv_Request::new().unwrap();
                 request.axle_position = 0;
+                request.state = -1;
                 let receiver = c.send(&request).unwrap();
                 match receiver.recv_timeout(Duration::from_millis(200), &mut selector_client) {
                     RecvResult::Ok((c, _response, _header)) => {
@@ -187,6 +188,7 @@ fn worker(
                 let c = client.take().unwrap();
                 let mut request = drobo_interfaces::srv::SolenoidStateSrv_Request::new().unwrap();
                 request.axle_position = 1;
+                request.state = -1;
                 let receiver = c.send(&request).unwrap();
                 match receiver.recv_timeout(Duration::from_millis(200), &mut selector_client) {
                     RecvResult::Ok((c, _response, _header)) => {
@@ -213,6 +215,7 @@ fn worker(
                 let c = client.take().unwrap();
                 let mut request = drobo_interfaces::srv::SolenoidStateSrv_Request::new().unwrap();
                 request.axle_position = 2;
+                request.state = -1;
                 let receiver = c.send(&request).unwrap();
                 match receiver.recv_timeout(Duration::from_millis(200), &mut selector_client) {
                     RecvResult::Ok((c, _response, _header)) => {
@@ -251,7 +254,7 @@ fn on_solenoid_service_received(
         logger,
         "{}番{} {}",
         request.axle_position,
-        if response.state[request.axle_position as usize] { "上昇" } else { "下降" },
+        if (response.state[request.axle_position as usize] && response.result) || (!response.state[request.axle_position as usize] && !response.result) { "上昇" } else { "下降" },
         if response.result { "許可" } else { "却下" }
     );
     dualsense_state[match request.axle_position {
