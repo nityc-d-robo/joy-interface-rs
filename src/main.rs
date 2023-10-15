@@ -73,7 +73,6 @@ fn worker(
     let logger = Rc::new(Logger::new("controller_2023"));
     let logger2 = logger.clone();
     let mut dualsense_state: [bool; 15] = [false; 15];
-    let mut solenoid_state: [bool; 3] = [false; 3];
     let mut support_wheel_prioritize = 0; // 1: 前, -1: 後ろ
     selector.add_subscriber(
         subscriber,
@@ -162,7 +161,6 @@ fn worker(
                 let c = client.take().unwrap();
                 let mut request = drobo_interfaces::srv::SolenoidStateSrv_Request::new().unwrap();
                 request.axle_position = 0;
-                request.state = solenoid_state[0] ^ true;
                 let receiver = c.send(&request).unwrap();
                 match receiver.recv_timeout(Duration::from_millis(200), &mut selector_client) {
                     RecvResult::Ok((c, _response, _header)) => {
@@ -170,7 +168,6 @@ fn worker(
                             &logger2,
                             &request,
                             &_response,
-                            &mut solenoid_state,
                             &mut dualsense_state,
                         );
                         client = Some(c);
@@ -190,7 +187,6 @@ fn worker(
                 let c = client.take().unwrap();
                 let mut request = drobo_interfaces::srv::SolenoidStateSrv_Request::new().unwrap();
                 request.axle_position = 1;
-                request.state = solenoid_state[1] ^ true;
                 let receiver = c.send(&request).unwrap();
                 match receiver.recv_timeout(Duration::from_millis(200), &mut selector_client) {
                     RecvResult::Ok((c, _response, _header)) => {
@@ -198,7 +194,6 @@ fn worker(
                             &logger2,
                             &request,
                             &_response,
-                            &mut solenoid_state,
                             &mut dualsense_state,
                         );
                         client = Some(c);
@@ -218,7 +213,6 @@ fn worker(
                 let c = client.take().unwrap();
                 let mut request = drobo_interfaces::srv::SolenoidStateSrv_Request::new().unwrap();
                 request.axle_position = 2;
-                request.state = solenoid_state[2] ^ true;
                 let receiver = c.send(&request).unwrap();
                 match receiver.recv_timeout(Duration::from_millis(200), &mut selector_client) {
                     RecvResult::Ok((c, _response, _header)) => {
@@ -226,7 +220,6 @@ fn worker(
                             &logger2,
                             &request,
                             &_response,
-                            &mut solenoid_state,
                             &mut dualsense_state,
                         );
                         client = Some(c);
@@ -252,24 +245,20 @@ fn on_solenoid_service_received(
     logger: &Rc<Logger>,
     request: &SolenoidStateSrv_Request,
     response: &SolenoidStateSrv_Response,
-    solenoid_state: &mut [bool; 3],
     dualsense_state: &mut [bool; 15],
 ) {
     pr_info!(
         logger,
         "{}番{} {}",
         request.axle_position,
-        if request.state { "上昇" } else { "下降" },
+        if response.state[request.axle_position as usize] { "上昇" } else { "下降" },
         if response.result { "許可" } else { "却下" }
     );
-    if response.result {
-        solenoid_state[request.axle_position as usize] = request.state;
-    }
     dualsense_state[match request.axle_position {
         0 => DualsenseState::D_PAD_LEFT,
         1 => DualsenseState::D_PAD_UP,
         2 => DualsenseState::D_PAD_RIGHT,
         _ => panic!(),
     }] = true;
-    pr_info!(logger, "現在のソレノイド状態: {:?}", solenoid_state);
+    pr_info!(logger, "現在のソレノイド状態: {:?}", response.state);
 }
