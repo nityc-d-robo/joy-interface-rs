@@ -13,6 +13,9 @@ impl PlaystationInterface {
     pub fn set_joy_msg(&mut self, _msg: sensor_msgs::msg::Joy){
         self.msg = _msg;
     }
+    pub fn pressed_start(&self) -> bool {
+        self.msg.buttons.as_slice()[BUTTONS_DUALSENSE::START] == 1
+    }
     pub fn pressed_l1(&self) -> bool {
         self.msg.buttons.as_slice()[BUTTONS_DUALSENSE::L1] == 1
     }

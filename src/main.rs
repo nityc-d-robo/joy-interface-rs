@@ -42,6 +42,7 @@ fn main() -> Result<(), DynError> {
     let subscriber = node.create_subscriber::<sensor_msgs::msg::Joy>("joy", None)?;
 
     let demeter_publisher = node.create_publisher::<std_msgs::msg::Int8>("demeter_oracle", None)?;
+    let sr_publisher = node.create_publisher::<std_msgs::msg::Bool>("sr_driver_topic", None)?;
     let support_wheel_publisher =
         node.create_publisher::<std_msgs::msg::Int32>("support_drive_topic", None)?;
     let client = node.create_client::<drobo_interfaces::srv::SolenoidStateSrv>(
@@ -55,6 +56,7 @@ fn main() -> Result<(), DynError> {
         subscriber,
         demeter_publisher,
         support_wheel_publisher,
+        sr_publisher,
         client,
     )?;
     Ok(())
@@ -66,6 +68,7 @@ fn worker(
     subscriber: Subscriber<sensor_msgs::msg::Joy>,
     demeter_publisher: Publisher<std_msgs::msg::Int8>,
     support_wheel_publisher: Publisher<std_msgs::msg::Int32>,
+    sr_publisher: Publisher<std_msgs::msg::Bool>,
     client: Client<drobo_interfaces::srv::SolenoidStateSrv>,
 ) -> Result<(), DynError> {
     let mut p9n = p9n_interface::PlaystationInterface::new(sensor_msgs::msg::Joy::new().unwrap());
@@ -73,11 +76,23 @@ fn worker(
     let logger = Rc::new(Logger::new("controller_2023"));
     let logger2 = logger.clone();
     let mut dualsense_state: [bool; 15] = [false; 15];
+    let mut sr_state = true;
     let mut support_wheel_prioritize = 0; // 1: 前, -1: 後ろ
     selector.add_subscriber(
         subscriber,
         Box::new(move |_msg| {
             p9n.set_joy_msg(_msg.get_owned().unwrap());
+
+            if p9n.pressed_start() && !dualsense_state[DualsenseState::START] {
+                dualsense_state[DualsenseState::START] = true;
+                let mut msg = std_msgs::msg::Bool::new().unwrap();
+                msg.data = !sr_state;
+                sr_publisher.send(&msg).unwrap();
+                sr_state ^= true;
+            }
+            if !p9n.pressed_start() && dualsense_state[DualsenseState::START] {
+                dualsense_state[DualsenseState::START] = false;
+            }
 
             if p9n.pressed_l1() && !dualsense_state[DualsenseState::L1] {
                 pr_info!(logger, "収穫機構: 上昇！");
@@ -113,14 +128,14 @@ fn worker(
             }
 
             if p9n.pressed_l2() {
-                if (dualsense_state[DualsenseState::R2] && !dualsense_state[DualsenseState::L2]) {
+                if dualsense_state[DualsenseState::R2] && !dualsense_state[DualsenseState::L2] {
                     support_wheel_prioritize = 1;
                 }
                 if support_wheel_prioritize >= 0 {
                     dualsense_state[DualsenseState::L2] = true;
                     pr_info!(logger, "中央輪動力: 前");
                     let mut msg = std_msgs::msg::Int32::new().unwrap();
-                    msg.data = ((p9n.pressed_l2_analog() - 1.0) * 500.0) as i32;
+                    msg.data = ((p9n.pressed_l2_analog() - 1.0) * 250.0) as i32;
                     support_wheel_publisher.send(&msg).unwrap();
                 }
             }
@@ -135,14 +150,14 @@ fn worker(
                 }
             }
             if p9n.pressed_r2() {
-                if (dualsense_state[DualsenseState::L2] && !dualsense_state[DualsenseState::R2]) {
+                if dualsense_state[DualsenseState::L2] && !dualsense_state[DualsenseState::R2] {
                     support_wheel_prioritize = -1;
                 }
-                if (support_wheel_prioritize <= 0) {
+                if support_wheel_prioritize <= 0 {
                     dualsense_state[DualsenseState::R2] = true;
                     pr_info!(logger, "中央輪動力: 後ろ");
                     let mut msg = std_msgs::msg::Int32::new().unwrap();
-                    msg.data = -((p9n.pressed_r2_analog() - 1.0) * 500.0) as i32;
+                    msg.data = -((p9n.pressed_r2_analog() - 1.0) * 250.0) as i32;
                     support_wheel_publisher.send(&msg).unwrap();
                 }
             }
