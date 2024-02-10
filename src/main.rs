@@ -9,6 +9,7 @@ use safe_drive::{
     msg::common_interfaces::{sensor_msgs, std_msgs},
     pr_fatal, pr_info,
     selector::Selector,
+    service::client::Client,
     topic::{publisher::Publisher, subscriber::Subscriber},
     RecvResult,
 };
@@ -34,17 +35,29 @@ pub mod DualsenseState {
 
 fn main() -> Result<(), DynError> {
     let ctx = Context::new()?;
-    let node = ctx.create_node("controller_b", None, Default::default())?;
+    let node = ctx.create_node("controller_2023", None, Default::default())?;
 
     let selector = ctx.create_selector()?;
     let selector_client = ctx.create_selector()?;
     let subscriber = node.create_subscriber::<sensor_msgs::msg::Joy>("joy", None)?;
 
-    
+    let demeter_publisher = node.create_publisher::<std_msgs::msg::Int8>("demeter_oracle", None)?;
+    let sr_publisher = node.create_publisher::<std_msgs::msg::Bool>("sr_driver_topic", None)?;
+    let support_wheel_publisher =
+        node.create_publisher::<std_msgs::msg::Int32>("support_drive_topic", None)?;
+    let client = node.create_client::<drobo_interfaces::srv::SolenoidStateSrv>(
+        "solenoid_order",
+        Default::default(),
+    )?;
+
     worker(
         selector,
-        subscriber
-        pubrisher
+        selector_client,
+        subscriber,
+        demeter_publisher,
+        support_wheel_publisher,
+        sr_publisher,
+        client,
     )?;
     Ok(())
 }
@@ -53,51 +66,217 @@ fn worker(
     mut selector: Selector,
     mut selector_client: Selector,
     subscriber: Subscriber<sensor_msgs::msg::Joy>,
-    
+    demeter_publisher: Publisher<std_msgs::msg::Int8>,
+    support_wheel_publisher: Publisher<std_msgs::msg::Int32>,
+    sr_publisher: Publisher<std_msgs::msg::Bool>,
+    client: Client<drobo_interfaces::srv::SolenoidStateSrv>,
 ) -> Result<(), DynError> {
     let mut p9n = p9n_interface::PlaystationInterface::new(sensor_msgs::msg::Joy::new().unwrap());
-    let logger = Rc::new(Logger::new("controller_b"));
-   
-    
+    let mut client = Some(client);
+    let logger = Rc::new(Logger::new("controller_2023"));
+    let logger2 = logger.clone();
+    let mut dualsense_state: [bool; 15] = [false; 15];
+    let mut sr_state = true;
+    let mut support_wheel_prioritize = 0; // 1: 前, -1: 後ろ
     selector.add_subscriber(
         subscriber,
         Box::new(move |_msg| {
             p9n.set_joy_msg(_msg.get_owned().unwrap());
 
-            if p9n.pressed_r2(){
-                send_speed(0x04,true,50,0,&publisher)
-                send_speed(0x05,false,50,0,&publisher)
+            if p9n.pressed_start() && !dualsense_state[DualsenseState::START] {
+                dualsense_state[DualsenseState::START] = true;
+                let mut msg = std_msgs::msg::Bool::new().unwrap();
+                msg.data = !sr_state;
+                sr_publisher.send(&msg).unwrap();
+                sr_state ^= true;
             }
-            if !p9n.pressed_r2(){
-                send_speed(0x04,true,0,0,&publisher)
-                send_speed(0x05,false,0,0,&publisher)
+            if !p9n.pressed_start() && dualsense_state[DualsenseState::START] {
+                dualsense_state[DualsenseState::START] = false;
+            }
 
+            if p9n.pressed_l1() && !dualsense_state[DualsenseState::L1] {
+                pr_info!(logger, "収穫機構: 上昇！");
+                dualsense_state[DualsenseState::L1] = true;
+                let mut msg = std_msgs::msg::Int8::new().unwrap();
+                msg.data = 1;
+                demeter_publisher.send(&msg).unwrap();
             }
-            
-            if p9n.pressed_r1(){
-                send_speed(0x06,false,50,90,&publisher)
+            if !p9n.pressed_l1() && dualsense_state[DualsenseState::L1] {
+                dualsense_state[DualsenseState::L1] = false;
+                if !p9n.pressed_r1() {
+                    pr_info!(logger, "収穫機構: ストップ！");
+                    let mut msg = std_msgs::msg::Int8::new().unwrap();
+                    msg.data = 0;
+                    demeter_publisher.send(&msg).unwrap();
+                }
             }
-            
-            
-            
-           
+            if p9n.pressed_r1() && !dualsense_state[DualsenseState::R1] {
+                pr_info!(logger, "収穫機構: 下降！");
+                dualsense_state[DualsenseState::R1] = true;
+                let mut msg = std_msgs::msg::Int8::new().unwrap();
+                msg.data = -1;
+                demeter_publisher.send(&msg).unwrap();
+            }
+            if !p9n.pressed_r1() && dualsense_state[DualsenseState::R1] {
+                dualsense_state[DualsenseState::R1] = false;
+                if !p9n.pressed_l1() {
+                    pr_info!(logger, "収穫機構: ストップ！");
+                    let mut msg = std_msgs::msg::Int8::new().unwrap();
+                    msg.data = 0;
+                    demeter_publisher.send(&msg).unwrap();
+                }
+            }
+
+            if p9n.pressed_l2() {
+                if dualsense_state[DualsenseState::R2] && !dualsense_state[DualsenseState::L2] {
+                    support_wheel_prioritize = 1;
+                }
+                if support_wheel_prioritize >= 0 {
+                    dualsense_state[DualsenseState::L2] = true;
+                    pr_info!(logger, "中央輪動力: 前");
+                    let mut msg = std_msgs::msg::Int32::new().unwrap();
+                    msg.data = ((p9n.pressed_l2_analog() - 1.0) * 250.0) as i32;
+                    support_wheel_publisher.send(&msg).unwrap();
+                }
+            }
+            if !p9n.pressed_l2() && dualsense_state[DualsenseState::L2] {
+                dualsense_state[DualsenseState::L2] = false;
+                if !p9n.pressed_r2() {
+                    support_wheel_prioritize = 0;
+                    pr_info!(logger, "中央輪動力: ストップ");
+                    let mut msg = std_msgs::msg::Int32::new().unwrap();
+                    msg.data = 0;
+                    support_wheel_publisher.send(&msg).unwrap();
+                }
+            }
+            if p9n.pressed_r2() {
+                if dualsense_state[DualsenseState::L2] && !dualsense_state[DualsenseState::R2] {
+                    support_wheel_prioritize = -1;
+                }
+                if support_wheel_prioritize <= 0 {
+                    dualsense_state[DualsenseState::R2] = true;
+                    pr_info!(logger, "中央輪動力: 後ろ");
+                    let mut msg = std_msgs::msg::Int32::new().unwrap();
+                    msg.data = -((p9n.pressed_r2_analog() - 1.0) * 250.0) as i32;
+                    support_wheel_publisher.send(&msg).unwrap();
+                }
+            }
+            if !p9n.pressed_r2() && dualsense_state[DualsenseState::R2] {
+                dualsense_state[DualsenseState::R2] = false;
+                if !p9n.pressed_l2() {
+                    support_wheel_prioritize = 0;
+                    pr_info!(logger, "中央輪動力: ストップ");
+                    let mut msg = std_msgs::msg::Int32::new().unwrap();
+                    msg.data = 0;
+                    support_wheel_publisher.send(&msg).unwrap();
+                }
+            }
+
+            if p9n.pressed_dpad_left() && !dualsense_state[DualsenseState::D_PAD_LEFT] {
+                let c = client.take().unwrap();
+                let mut request = drobo_interfaces::srv::SolenoidStateSrv_Request::new().unwrap();
+                request.axle_position = 0;
+                request.state = -1;
+                let receiver = c.send(&request).unwrap();
+                match receiver.recv_timeout(Duration::from_millis(200), &mut selector_client) {
+                    RecvResult::Ok((c, _response, _header)) => {
+                        on_solenoid_service_received(
+                            &logger2,
+                            &request,
+                            &_response,
+                            &mut dualsense_state,
+                        );
+                        client = Some(c);
+                    }
+                    RecvResult::RetryLater(r) => client = Some(r.give_up()),
+                    RecvResult::Err(e) => {
+                        pr_fatal!(logger, "{e}");
+                        panic!()
+                    }
+                }
+            }
+            if !p9n.pressed_dpad_left() && dualsense_state[DualsenseState::D_PAD_LEFT] {
+                dualsense_state[DualsenseState::D_PAD_LEFT] = false;
+            }
+
+            if p9n.pressed_dpad_up() && !dualsense_state[DualsenseState::D_PAD_UP] {
+                let c = client.take().unwrap();
+                let mut request = drobo_interfaces::srv::SolenoidStateSrv_Request::new().unwrap();
+                request.axle_position = 1;
+                request.state = -1;
+                let receiver = c.send(&request).unwrap();
+                match receiver.recv_timeout(Duration::from_millis(200), &mut selector_client) {
+                    RecvResult::Ok((c, _response, _header)) => {
+                        on_solenoid_service_received(
+                            &logger2,
+                            &request,
+                            &_response,
+                            &mut dualsense_state,
+                        );
+                        client = Some(c);
+                    }
+                    RecvResult::RetryLater(r) => client = Some(r.give_up()),
+                    RecvResult::Err(e) => {
+                        pr_fatal!(logger, "{e}");
+                        panic!()
+                    }
+                }
+            }
+            if !p9n.pressed_dpad_up() && dualsense_state[DualsenseState::D_PAD_UP] {
+                dualsense_state[DualsenseState::D_PAD_UP] = false;
+            }
+
+            if p9n.pressed_dpad_right() && !dualsense_state[DualsenseState::D_PAD_RIGHT] {
+                let c = client.take().unwrap();
+                let mut request = drobo_interfaces::srv::SolenoidStateSrv_Request::new().unwrap();
+                request.axle_position = 2;
+                request.state = -1;
+                let receiver = c.send(&request).unwrap();
+                match receiver.recv_timeout(Duration::from_millis(200), &mut selector_client) {
+                    RecvResult::Ok((c, _response, _header)) => {
+                        on_solenoid_service_received(
+                            &logger2,
+                            &request,
+                            &_response,
+                            &mut dualsense_state,
+                        );
+                        client = Some(c);
+                    }
+                    RecvResult::RetryLater(r) => client = Some(r.give_up()),
+                    RecvResult::Err(e) => {
+                        pr_fatal!(logger, "{e}");
+                        panic!()
+                    }
+                }
+            }
+            if !p9n.pressed_dpad_right() && dualsense_state[DualsenseState::D_PAD_RIGHT] {
+                dualsense_state[DualsenseState::D_PAD_RIGHT] = false;
+            }
         }),
     );
     loop {
         selector.wait()?;
     }
-
-}
-fn send_speed(_address:u32, _semi_id:u32,_phase:bool,_speed:u32,_angle:i32,publisher:&Publisher<MdLibMsg>){
-    let mut msg = drobo_interfaces::msg::MdLibMsg::new().unwrap();
-    msg.address = _address as u8;
-    msg.semi_id = _semi_id as u8;
-    msg.mode = 3 as u8; //MotorLibのspeedモードに倣いました
-    msg.phase = _phase as bool;
-    msg.power = _speed as u16;
-    msg.angle = _angle as i32;
-
-    publisher.send(&msg).unwrap()
-
 }
 
+fn on_solenoid_service_received(
+    logger: &Rc<Logger>,
+    request: &SolenoidStateSrv_Request,
+    response: &SolenoidStateSrv_Response,
+    dualsense_state: &mut [bool; 15],
+) {
+    pr_info!(
+        logger,
+        "{}番{} {}",
+        request.axle_position,
+        if (response.state[request.axle_position as usize] && response.result) || (!response.state[request.axle_position as usize] && !response.result) { "上昇" } else { "下降" },
+        if response.result { "許可" } else { "却下" }
+    );
+    dualsense_state[match request.axle_position {
+        0 => DualsenseState::D_PAD_LEFT,
+        1 => DualsenseState::D_PAD_UP,
+        2 => DualsenseState::D_PAD_RIGHT,
+        _ => panic!(),
+    }] = true;
+    pr_info!(logger, "現在のソレノイド状態: {:?}", response.state);
+}
